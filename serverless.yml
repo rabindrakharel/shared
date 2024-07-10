@@ -1,0 +1,242 @@
+service: Lambda_0012NDKKAI_ATMO
+
+frameworkVersion: "3"
+
+provider:
+  name: aws
+  runtime: python3.9
+  region: ${opt:region, 'us-east-1'}
+  stage: ${opt:stage, 'prod'}
+  environment:
+    STAGE: ${self:provider.stage}
+
+  iam:
+    role:
+      name: vcare-lambda-role
+      managedPolicies:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      statements:
+        - Effect: "Allow"
+          Action:
+            - "dynamodb:*"
+          Resource: "*"
+        - Effect: "Allow"
+          Action:
+            - "rds:*"
+          Resource: "*"
+        - Effect: "Allow"
+          Action:
+            - "logs:CreateLogGroup"
+            - "logs:CreateLogStream"
+            - "logs:PutLogEvents"
+          Resource: "arn:aws:logs:us-east-1:809535167323:*"
+        - Effect: "Allow"
+          Action:
+            - "rds-db:connect"
+          Resource: "arn:aws:rds:us-east-1:809535167323:db-proxy:proxy-rds-prod-vcare-aggregates"
+        - Effect: "Allow"
+          Action:
+            - "cognito-idp:AdminGetUser"
+            - "cognito-idp:ListGroups"
+            - "cognito-idp:GetUser"
+          Resource: "arn:aws:cognito-idp:us-east-1:809535167323:userpool/us-east-1_KLO8O9Cnp"
+        - Effect: "Allow"
+          Action:
+            - "apigateway:GET"
+            - "apigateway:POST"
+            - "apigateway:PUT"
+            - "apigateway:DELETE"
+          Resource: "*"
+        - Effect: "Allow"
+          Action:
+            - "ec2:CreateNetworkInterface"
+            - "ec2:DescribeNetworkInterfaces"
+            - "ec2:DeleteNetworkInterface"
+          Resource: "*"
+        - Effect: "Allow"
+          Action:
+            - "dynamodb:DescribeStream"
+            - "dynamodb:GetRecords"
+            - "dynamodb:GetShardIterator"
+            - "dynamodb:ListStreams"
+            - "dynamodb:UpdateItem"
+            - "dynamodb:PutItem"
+            - "dynamodb:DeleteItem"
+          Resource: "*"
+        - Effect: "Allow"
+          Action:
+            - "kms:Decrypt"
+            - "kms:Encrypt"
+            - "kms:GenerateDataKey"
+          Resource: "*"
+
+  vpc:
+    securityGroupIds:
+      - "sg-097ba81c776b96a99"
+      - "sg-0c70e561293e3bd1f"
+    subnetIds:
+      - "subnet-0c68c0bca0fad3572" 
+
+  logs:
+    restApi:
+      accessLogging: true
+    websocket:
+      level: INFO
+    frameworkLambda: true
+    retentionInDays: 14
+
+layers:
+  dependencyLayer:
+    path: layer
+    name: "${self:provider.stage}-dependencies-layer"
+    compatibleRuntimes:
+      - python3.9
+
+functions:
+  Stage_Patientaggregatelambda:
+    handler: functions.Stage_Patientaggregatelambda.lambda_handler
+    runtime: python3.9
+    name: "Stage_Patientaggregatelambda"
+    timeout: 90
+    role: arn:aws:iam::809535167323:role/vcare-lambda-role
+    layers:
+      - { Ref: "DependencyLayerLambdaLayer" }
+    vpc:
+      securityGroupIds:
+        - "sg-097ba81c776b96a99"
+        - "sg-0c70e561293e3bd1f"
+      subnetIds:
+        - "subnet-0c68c0bca0fad3572"
+    events:
+      - http:
+          path: patientaggregate
+          method: post
+          cors: true
+          authorizer:
+            name: ApiGatewayAuthorizer
+            type: COGNITO_USER_POOLS
+            arn: "arn:aws:cognito-idp:us-east-1:809535167323:userpool/us-east-1_KLO8O9Cnp"
+
+  DynamoDBStreamHandler:
+    handler: functions.dynamodbStreamHandler.lambda_handler
+    runtime: python3.9
+    name: "DynamoDBStreamHandler"
+    timeout: 60
+    role: arn:aws:iam::809535167323:role/vcare-lambda-role
+    events:
+      - stream:
+          type: dynamodb
+          arn: arn:aws:dynamodb:us-east-1:809535167323:table/resource-db-prod/stream/2024-03-28T08:17:08.628
+          batchSize: 5
+          startingPosition: LATEST
+
+  Stage_StreamProcessor:
+    handler: functions.Stage_StreamProcessor.lambda_handler
+    runtime: python3.9
+    name: "Stage_StreamProcessor"
+    timeout: 60
+    role: arn:aws:iam::809535167323:role/vcare-lambda-role
+    layers:
+      - { Ref: "DependencyLayerLambdaLayer" }
+    events:
+      - stream:
+          type: dynamodb
+          arn: arn:aws:dynamodb:us-east-1:809535167323:table/resource-db-prod/stream/2024-03-28T08:17:08.628
+          batchSize: 5
+          startingPosition: LATEST
+
+resources:
+  Resources:
+    ApiGatewayExecutionRole:
+      Type: "AWS::IAM::Role"
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: "Allow"
+              Principal:
+                Service: "apigateway.amazonaws.com"
+              Action: "sts:AssumeRole"
+        Policies:
+          - PolicyName: "ApiGatewayPolicy"
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: "Allow"
+                  Action:
+                    - "lambda:InvokeFunction"
+                  Resource: "*"
+
+    LambdaExecutionRole:
+      Type: "AWS::IAM::Role"
+      Properties:
+        RoleName: vcare-lambda-role
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: "Allow"
+              Principal:
+                Service: "lambda.amazonaws.com"
+              Action: "sts:AssumeRole"
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        Policies:
+          - PolicyName: vcare-lambda-policy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: "Allow"
+                  Action:
+                    - "dynamodb:*"
+                  Resource: "*"
+                - Effect: "Allow"
+                  Action:
+                    - "rds:*"
+                  Resource: "*"
+                - Effect: "Allow"
+                  Action:
+                    - "logs:CreateLogGroup"
+                    - "logs:CreateLogStream"
+                    - "logs:PutLogEvents"
+                  Resource: "arn:aws:logs:us-east-1:809535167323:*"
+                - Effect: "Allow"
+                  Action:
+                    - "rds-db:connect"
+                  Resource: "arn:aws:rds:us-east-1:809535167323:db-proxy:proxy-rds-prod-vcare-aggregates"
+                - Effect: "Allow"
+                  Action:
+                    - "cognito-idp:*"
+                  Resource: "arn:aws:cognito-idp:us-east-1:809535167323:userpool/us-east-1_KLO8O9Cnp"
+                - Effect: "Allow"
+                  Action:
+                    - "apigateway:GET"
+                    - "apigateway:POST"
+                    - "apigateway:PUT"
+                    - "apigateway:DELETE"
+                  Resource: "*"
+                - Effect: "Allow"
+                  Action:
+                    - "ec2:CreateNetworkInterface"
+                    - "ec2:DescribeNetworkInterfaces"
+                    - "ec2:DeleteNetworkInterface"
+                  Resource: "*"
+                - Effect: "Allow"
+                  Action:
+                    - "dynamodb:DescribeStream"
+                    - "dynamodb:GetRecords"
+                    - "dynamodb:GetShardIterator"
+                    - "dynamodb:ListStreams"
+                    - "dynamodb:UpdateItem"
+                    - "dynamodb:PutItem"
+                    - "dynamodb:DeleteItem"
+                  Resource: "*"
+                - Effect: "Allow"
+                  Action:
+                    - "kms:Decrypt"
+                    - "kms:Encrypt"
+                    - "kms:GenerateDataKey"
+                  Resource: "*"
+
+plugins:
+  - serverless-offline
+  - serverless-plugin-include-dependencies
