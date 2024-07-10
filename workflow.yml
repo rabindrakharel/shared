@@ -1,0 +1,147 @@
+name: CICD-Deployment
+
+on:
+  push:
+    branches: [prod]
+
+jobs:
+  CICD-Main-Workflow:
+    name: "Prod: Lambda_023dNN34_ATMO"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: 'true'
+
+
+      - name: SETUP I [Node.js]
+        uses: actions/setup-node@v2
+        with:
+          node-version: '18'
+
+      - name: SETUP II [Serverless]
+        run: |
+          npm install -g serverless@3.38.0
+          serverless plugin install -n serverless-offline
+          serverless plugin install -n serverless-plugin-include-dependencies
+
+      - name: SETUP III [Cache NPM and Poetry]
+        uses: actions/cache@v2
+        with:
+          path: |
+            ~/.npm
+            ~/.cache/pypoetry
+          key: ${{ runner.os }}-npm-poetry-${{ hashFiles('**/package-lock.json', '**/poetry.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-poetry-
+
+      - name: INSTALL I [Python]
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.9'
+
+
+      - name: INSTALL II [Poetry]
+        run: |
+          curl -sSL https://install.python-poetry.org | python3 -
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: INSTALL III [Poetry dependencies]
+        run: |
+          poetry config virtualenvs.create false
+          poetry install
+          
+
+
+      - name: Display pyproject.toml
+        run: |
+          cat pyproject.toml
+
+      - name: Create layer directory
+        run: |
+          mkdir -p layer/python/lib/python3.9/site-packages
+          poetry export -f requirements.txt --output requirements.txt --without-hashes
+          pip install -r requirements.txt -t layer/python/lib/python3.9/site-packages  
+
+      - name: INSTALL IV [Serverless dependencies]
+        run: docker compose -f test/resources/docker-compose.yaml up -d --wait postgres-db
+
+      - name: TEST I [Environment and directory checks]
+        run: |
+            echo "Current working directory:"
+            pwd
+            echo "Environment variables sorted alphabetically:"
+            printenv | sort
+            echo "Current user and file permissions in the working directory:"
+            whoami
+            ls -l
+      - name: TEST II [ Poetry & Python]
+        run: |
+          echo "Python version:"
+#          poetry run pytest test
+
+      - name: CLEANUP [Check and Delete Existing Log Group]
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.Lambda_023dNN34_ATMOLAMBDA_ACCESS_KEYID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.Lambda_023dNN34_ATMOLAMBDA_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: 'us-east-1'
+        run: |
+          aws configure set default.region $AWS_DEFAULT_REGION
+          aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+          aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+          LOG_GROUP_EXISTS=$(aws logs describe-log-groups --log-group-name-prefix "/aws/lambda/Stage_ASYNC_WAF_RDS_DYNAMO" --query 'logGroups[?logGroupName==`/aws/lambda/Stage_ASYNC_WAF_RDS_DYNAMO`].logGroupName' --output text)
+          if [ "$LOG_GROUP_EXISTS" = "/aws/lambda/Stage_ASYNC_WAF_RDS_DYNAMO" ]; then
+            aws logs delete-log-group --log-group-name /aws/lambda/Stage_ASYNC_WAF_RDS_DYNAMO
+          fi
+
+      - name: DEPLOYMENT I [Install dependencies and deploy]
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.Lambda_023dNN34_ATMOLAMBDA_ACCESS_KEYID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.Lambda_023dNN34_ATMOLAMBDA_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: 'us-east-1'
+        run: |
+          poetry run serverless deploy --verbose --config serverless.yml --force
+        if: github.ref == 'refs/heads/prod'
+
+      - name: Configure AWS Credentials for Lambda Invocation
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.Lambda_023dNN34_ATMOLAMBDA_ACCESS_KEYID }}
+          aws-secret-access-key: ${{ secrets.Lambda_023dNN34_ATMOLAMBDA_ACCESS_KEY }}
+          aws-region: 'us-east-1'
+
+#      - name: Run Insert DynamoDB to Postgres Init
+#        env:
+#          AWS_ACCESS_KEY_ID: ${{ secrets.Lambda_023dNN34_ATMOLAMBDA_ACCESS_KEYID }}
+#          AWS_SECRET_ACCESS_KEY: ${{ secrets.Lambda_023dNN34_ATMOLAMBDA_ACCESS_KEY }}
+#          AWS_DEFAULT_REGION: 'us-east-1'
+#          PYTHONPATH: "./"
+#        run: |
+#          python src/vcare_py/DynamoDBClient.py
+# Below line triggers another workflow.. Not needed now but can be used in future.
+  Lambda-Full-Load:
+    needs: CICD-Main-Workflow
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Full Data Load Workflow
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -X POST -H "Accept: application/vnd.github.v3+json" \
+          -H "Authorization: token $GITHUB_TOKEN" \
+          https://api.github.com/repos/${{ github.repository }}/dispatches \
+          -d '{"event_type": "invoke-lambda-event", "client_payload": {"trigger_reason": "Triggered by cicd.yml"}}'
+
+  cleanup:
+    name: "Cleanup on Failure"
+    needs: CICD-Main-Workflow
+    if: failure() && github.ref == 'refs/heads/prod'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete CloudWatch Log Group
+        run: |
+          aws configure set aws_access_key_id ${{ secrets.Lambda_023dNN34_ATMOLAMBDA_ACCESS_KEYID }}
+          aws configure set aws_secret_access_key ${{ secrets.Lambda_023dNN34_ATMOLAMBDA_ACCESS_KEY }}
+          aws configure set default.region us-east-1
+          aws logs delete-log-group --log-group-name StageUnderscoreASYNC_WAF_RDS_DYNAMOLogGroup
